@@ -1,10 +1,12 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Shield, Activity, UploadCloud, Terminal, Download, Info, X, Target, Zap, FileText } from 'lucide-react';
+import { Shield, Activity, UploadCloud, Terminal, Download, Info, X, Target, Zap, FileText, LogOut, Database, History } from 'lucide-react';
 import axios from 'axios';
 import { PieChart, Pie, Cell, BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts';
 import jsPDF from 'jspdf';
 import 'jspdf-autotable';
 import toast, { Toaster } from 'react-hot-toast';
+import { supabase } from '../supabaseClient';
+import { useNavigate } from 'react-router-dom';
 
 const COLORS = {
   normal: '#00ff3f', // neon green
@@ -27,13 +29,38 @@ const Dashboard = () => {
   const [loading, setLoading] = useState(false);
   const [results, setResults] = useState(null);
   const [modalData, setModalData] = useState(null);
-  
-  // Drag and Drop
   const [isDragging, setIsDragging] = useState(false);
   
-  // Terminal Logs Animation
   const [visibleLogs, setVisibleLogs] = useState([]);
   const logsContainerRef = useRef(null);
+  
+  // Supabase History State
+  const [history, setHistory] = useState([]);
+  const [showHistory, setShowHistory] = useState(false);
+  const navigate = useNavigate();
+
+  useEffect(() => {
+    fetchHistory();
+  }, []);
+
+  const fetchHistory = async () => {
+    const { data: { user } } = await supabase.auth.getUser();
+    if (user) {
+      const { data, error } = await supabase
+        .from('analysis_history')
+        .select('*')
+        .order('created_at', { ascending: false })
+        .limit(10);
+      if (!error && data) {
+        setHistory(data);
+      }
+    }
+  };
+
+  const handleLogout = async () => {
+    await supabase.auth.signOut();
+    navigate('/login');
+  };
 
   useEffect(() => {
     if (logsContainerRef.current) {
@@ -47,9 +74,7 @@ const Dashboard = () => {
       let i = 0;
       const interval = setInterval(() => {
         if (i < results.logs.length) {
-          // React state closure requires using updater function
           setVisibleLogs(prev => {
-             // Prevents duplicate pushing if React runs twice in Strict Mode
              if (prev.length >= results.logs.length) return prev;
              return [...prev, results.logs[prev.length]];
           });
@@ -57,20 +82,13 @@ const Dashboard = () => {
         } else {
           clearInterval(interval);
         }
-      }, 50); // 50ms between log prints
+      }, 50); 
       return () => clearInterval(interval);
     }
   }, [results]);
 
-  const onDragOver = useCallback((e) => {
-    e.preventDefault();
-    setIsDragging(true);
-  }, []);
-
-  const onDragLeave = useCallback((e) => {
-    e.preventDefault();
-    setIsDragging(false);
-  }, []);
+  const onDragOver = useCallback((e) => { e.preventDefault(); setIsDragging(true); }, []);
+  const onDragLeave = useCallback((e) => { e.preventDefault(); setIsDragging(false); }, []);
 
   const onDrop = useCallback((e) => {
     e.preventDefault();
@@ -91,7 +109,6 @@ const Dashboard = () => {
       const selectedFile = e.target.files[0];
       setFile(selectedFile);
       handleUpload(selectedFile);
-      // Reset input value to fix "Same File" upload bug
       e.target.value = null;
     }
   };
@@ -99,8 +116,9 @@ const Dashboard = () => {
   const handleUpload = async (fileToUpload) => {
     if (!fileToUpload) return;
     setLoading(true);
-    setResults(null); // Clear stale state
+    setResults(null); 
     setVisibleLogs([]);
+    setShowHistory(false);
     
     const formData = new FormData();
     formData.append('file', fileToUpload);
@@ -109,10 +127,33 @@ const Dashboard = () => {
       const response = await axios.post('http://localhost:5000/api/predict', formData, {
         headers: { 'Content-Type': 'multipart/form-data' }
       });
-      setResults(response.data);
+      const data = response.data;
+      setResults(data);
       toast.success("Analysis Complete!", {
          style: { background: '#171717', color: '#00ff3f', border: '1px solid #00ff3f' }
       });
+
+      // Save to Supabase SQL
+      const { data: { user } } = await supabase.auth.getUser();
+      if (user) {
+        const { error } = await supabase.from('analysis_history').insert([{
+          user_id: user.id,
+          total_records: data.total_records,
+          threat_level: data.threat_level,
+          filename: fileToUpload.name,
+          normal_count: data.stats.normal || 0,
+          dos_count: data.stats.dos || 0,
+          probe_count: data.stats.probe || 0,
+          r2l_count: data.stats.r2l || 0,
+          u2r_count: data.stats.u2r || 0,
+        }]);
+        if (!error) {
+           fetchHistory(); // update the sidebar
+        } else {
+           console.error("Supabase Save Error:", error);
+        }
+      }
+
     } catch (error) {
       console.error("Error uploading file:", error);
       const errMsg = error.response?.data?.error || "Failed to analyze data. Please check backend.";
@@ -129,7 +170,6 @@ const Dashboard = () => {
     if (!results) return;
     const doc = new jsPDF();
     
-    // Branding
     doc.setFillColor(15, 23, 42); 
     doc.rect(0, 0, 210, 40, 'F');
     doc.setTextColor(0, 243, 255); 
@@ -141,7 +181,6 @@ const Dashboard = () => {
     doc.setFont("helvetica", "normal");
     doc.text("Intrusion Detection System - Threat Report", 14, 30);
     
-    // Meta Data
     doc.setTextColor(0, 0, 0);
     doc.setFontSize(11);
     doc.text(`Generated Date: ${new Date().toLocaleString()}`, 14, 50);
@@ -152,7 +191,6 @@ const Dashboard = () => {
     doc.setTextColor(threatLevel > 20 ? 255 : 0, threatLevel > 20 ? 0 : 200, 0);
     doc.text(`Overall Threat Level: ${threatLevel}%`, 14, 66);
     
-    // Table Data
     const tableData = Object.entries(results.stats).map(([key, value]) => [
       key.toUpperCase(), 
       value.toLocaleString(), 
@@ -168,7 +206,6 @@ const Dashboard = () => {
       styles: { font: "helvetica" }
     });
     
-    // Footer
     const finalY = doc.lastAutoTable.finalY || 75;
     doc.setFontSize(10);
     doc.setTextColor(150);
@@ -177,7 +214,6 @@ const Dashboard = () => {
     doc.save("SentinelAI_Security_Report.pdf");
   };
 
-  // Filter out 0-value items for Pie Chart
   const pieData = results 
     ? Object.entries(results.stats)
         .filter(([_, value]) => value > 0)
@@ -185,10 +221,10 @@ const Dashboard = () => {
     : [];
 
   return (
-    <div className="flex h-screen overflow-hidden flex-col md:flex-row">
+    <div className="flex h-screen overflow-hidden flex-col md:flex-row bg-dark-900">
       <Toaster position="top-right" />
       
-      {/* Sidebar - Hidden on mobile, flex on md and up */}
+      {/* Sidebar */}
       <div className="hidden md:flex w-64 bg-dark-800 border-r border-dark-700 p-6 flex-col z-20 shadow-xl shadow-black/50">
         <div className="flex items-center gap-3 mb-10">
           <Shield className="w-8 h-8 text-neon-cyan drop-shadow-[0_0_8px_rgba(0,243,255,0.8)]" />
@@ -196,38 +232,45 @@ const Dashboard = () => {
         </div>
         
         <nav className="flex-1 space-y-4">
-          <a href="#" className="flex items-center gap-3 text-neon-cyan bg-dark-700/50 p-3 rounded-lg border border-neon-cyan/20 shadow-[0_0_15px_rgba(0,243,255,0.1)]">
+          <button 
+             onClick={() => setShowHistory(false)}
+             className={`w-full flex items-center gap-3 p-3 rounded-lg transition-colors border ${!showHistory ? 'text-neon-cyan bg-dark-700/50 border-neon-cyan/20 shadow-[0_0_15px_rgba(0,243,255,0.1)]' : 'text-gray-400 border-transparent hover:text-white'}`}
+          >
             <Activity className="w-5 h-5" />
             <span>Dashboard</span>
-          </a>
-          <a href="#" className="flex items-center gap-3 text-gray-400 hover:text-white p-3 rounded-lg transition-colors">
-            <Terminal className="w-5 h-5" />
-            <span>Live Logs</span>
-          </a>
+          </button>
+          
+          <button 
+             onClick={() => setShowHistory(true)}
+             className={`w-full flex items-center gap-3 p-3 rounded-lg transition-colors border ${showHistory ? 'text-neon-cyan bg-dark-700/50 border-neon-cyan/20 shadow-[0_0_15px_rgba(0,243,255,0.1)]' : 'text-gray-400 border-transparent hover:text-white'}`}
+          >
+            <History className="w-5 h-5" />
+            <span>Analysis History</span>
+          </button>
         </nav>
 
-        <div className="mt-auto bg-dark-900/50 rounded-xl p-4 border border-dark-700 shadow-inner">
-          <div className="flex items-center gap-2 mb-3 text-gray-300 font-semibold text-sm uppercase tracking-wider">
-             <Zap className="w-4 h-4 text-neon-yellow" /> ML Metrics
-          </div>
-          <div className="space-y-2 text-xs font-mono">
-            <div className="flex justify-between">
-              <span className="text-gray-500">Algorithm</span>
-              <span className="text-neon-cyan">Random Forest</span>
-            </div>
-            <div className="flex justify-between">
-              <span className="text-gray-500">Accuracy</span>
-              <span className="text-neon-green">82.70%</span>
-            </div>
-            <div className="flex justify-between">
-              <span className="text-gray-500">F1-Score</span>
-              <span className="text-white">0.79</span>
-            </div>
-            <div className="flex justify-between">
-              <span className="text-gray-500">Dataset</span>
-              <span className="text-gray-300">NSL-KDD</span>
-            </div>
-          </div>
+        <div className="mt-auto space-y-4">
+           <div className="bg-dark-900/50 rounded-xl p-4 border border-dark-700 shadow-inner">
+             <div className="flex items-center gap-2 mb-3 text-gray-300 font-semibold text-sm uppercase tracking-wider">
+                <Database className="w-4 h-4 text-neon-yellow" /> Data Source
+             </div>
+             <div className="text-xs text-gray-400 flex justify-between">
+                <span>Status</span>
+                <span className="text-neon-green">Connected</span>
+             </div>
+             <div className="text-xs text-gray-400 flex justify-between mt-1">
+                <span>Storage</span>
+                <span className="text-white">Supabase SQL</span>
+             </div>
+           </div>
+
+           <button 
+              onClick={handleLogout}
+              className="w-full flex items-center gap-3 text-neon-red hover:bg-neon-red/10 border border-transparent hover:border-neon-red/30 p-3 rounded-lg transition-colors"
+           >
+              <LogOut className="w-5 h-5" />
+              <span>Sign Out</span>
+           </button>
         </div>
       </div>
 
@@ -243,14 +286,16 @@ const Dashboard = () => {
                  <h1 className="text-lg font-bold text-white tracking-wider">SENTINEL<span className="text-neon-cyan">.AI</span></h1>
               </div>
               <h2 className="text-2xl md:text-3xl font-bold text-white flex items-center gap-3">
-                 Intrusion Detection System
+                 {showHistory ? 'Analysis History' : 'Intrusion Detection System'}
               </h2>
-              <p className="text-gray-400 mt-1 text-sm md:text-base">Upload network traffic CSV for ML-based threat analysis</p>
+              <p className="text-gray-400 mt-1 text-sm md:text-base">
+                 {showHistory ? 'View past machine learning traffic analyses from your SQL database' : 'Upload network traffic CSV for ML-based threat analysis'}
+              </p>
             </div>
             
             <div className="flex flex-wrap gap-4 items-center w-full md:w-auto">
                <div className="flex gap-2 items-center w-full md:w-auto justify-end">
-                 {results && (
+                 {results && !showHistory && (
                    <button 
                      onClick={generatePDF}
                      className="bg-dark-700 text-white border border-dark-600 px-4 py-2.5 rounded-xl font-medium hover:bg-dark-600 transition-all flex items-center gap-2 group text-sm md:text-base"
@@ -262,7 +307,40 @@ const Dashboard = () => {
             </div>
           </header>
 
-          {!results && (
+          {/* HISTORY VIEW */}
+          {showHistory && (
+             <div className="bg-dark-800/80 backdrop-blur-md p-6 rounded-2xl border border-dark-700">
+                {history.length === 0 ? (
+                   <div className="text-center py-12 text-gray-500">No previous analyses found in database.</div>
+                ) : (
+                   <div className="space-y-4">
+                      {history.map((record) => (
+                         <div key={record.id} className="flex justify-between items-center bg-dark-900/50 p-4 rounded-xl border border-dark-700 hover:border-dark-600 transition-colors">
+                            <div>
+                               <div className="text-white font-medium">{record.filename}</div>
+                               <div className="text-sm text-gray-500">{new Date(record.created_at).toLocaleString()}</div>
+                            </div>
+                            <div className="flex items-center gap-6">
+                               <div className="text-right hidden md:block">
+                                  <div className="text-xs text-gray-500 uppercase">Records</div>
+                                  <div className="text-white font-mono">{record.total_records.toLocaleString()}</div>
+                               </div>
+                               <div className="text-right">
+                                  <div className="text-xs text-gray-500 uppercase">Threat Level</div>
+                                  <div className={`font-bold text-lg ${record.threat_level > 20 ? 'text-neon-red drop-shadow-[0_0_5px_rgba(255,0,60,0.5)]' : 'text-neon-green'}`}>
+                                     {Number(record.threat_level).toFixed(2)}%
+                                  </div>
+                               </div>
+                            </div>
+                         </div>
+                      ))}
+                   </div>
+                )}
+             </div>
+          )}
+
+          {/* MAIN UPLOAD VIEW */}
+          {!showHistory && !results && (
             <div 
               onDragOver={onDragOver}
               onDragLeave={onDragLeave}
@@ -304,10 +382,10 @@ const Dashboard = () => {
             </div>
           )}
 
-          {results && (
+          {/* MAIN RESULTS VIEW */}
+          {!showHistory && results && (
             <div className="space-y-6 animate-in fade-in slide-in-from-bottom-8 duration-700">
               
-              {/* Reset Data Button Row */}
               <div className="flex justify-end">
                 <button 
                    onClick={() => setResults(null)}
@@ -317,7 +395,6 @@ const Dashboard = () => {
                 </button>
               </div>
 
-              {/* Stats Row */}
               <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
                 <div className="bg-dark-800/80 backdrop-blur-md p-6 rounded-2xl border border-dark-700 relative overflow-hidden group hover:border-dark-600 transition-colors">
                   <div className="absolute inset-0 bg-gradient-to-br from-white/5 to-transparent opacity-0 group-hover:opacity-100 transition-opacity" />
@@ -351,7 +428,6 @@ const Dashboard = () => {
                 </div>
               </div>
 
-              {/* Charts Row */}
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 h-96">
                 <div className="bg-dark-800/80 backdrop-blur-md p-6 rounded-2xl border border-dark-700 flex flex-col hover:border-dark-600 transition-colors">
                   <h3 className="text-lg font-medium text-white mb-4 uppercase tracking-widest text-sm text-gray-400">Attack Distribution</h3>
@@ -411,16 +487,10 @@ const Dashboard = () => {
                 </div>
               </div>
 
-              {/* Live Terminal Logs */}
               <div className="bg-[#050505] rounded-2xl border border-dark-700 overflow-hidden font-mono shadow-2xl">
                 <div className="bg-dark-800/80 px-5 py-3 border-b border-dark-700 flex items-center gap-3">
                   <Terminal className="w-5 h-5 text-neon-cyan" />
                   <span className="text-sm font-semibold text-gray-300 uppercase tracking-widest">Live Stream Logs</span>
-                  <div className="ml-auto flex gap-2">
-                    <div className="w-3 h-3 rounded-full bg-dark-600 animate-pulse"></div>
-                    <div className="w-3 h-3 rounded-full bg-dark-600 animate-pulse delay-75"></div>
-                    <div className="w-3 h-3 rounded-full bg-dark-600 animate-pulse delay-150"></div>
-                  </div>
                 </div>
                 <div 
                    ref={logsContainerRef}
@@ -428,7 +498,6 @@ const Dashboard = () => {
                 >
                   {visibleLogs.map((log, i) => {
                     const isNormal = log.prediction === 'normal';
-                    // Generate a fake timestamp simulating a real stream, offset by the index
                     const time = new Date(Date.now() - (results.logs.length - i) * 1234);
                     const timeStr = time.toISOString().split('T')[1].slice(0, 12);
                     
@@ -439,7 +508,6 @@ const Dashboard = () => {
                           {isNormal ? '[INFO]' : '[CRIT]'}
                         </span>
                         <span className="text-gray-400 group-hover:text-gray-300 transition-colors hidden md:inline">Analyzing traffic vector...</span>
-                        <span className="text-gray-400 group-hover:text-gray-300 transition-colors md:hidden">Traffic...</span>
                         
                         <span className="ml-auto flex items-center gap-2">
                           <span className="text-gray-500 hidden md:inline">Predicted:</span>
@@ -460,14 +528,10 @@ const Dashboard = () => {
         </div>
       </div>
 
-      {/* Attack Info Modal */}
       {modalData && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-in fade-in duration-200">
            <div className={`bg-dark-800 border ${modalData.border} rounded-2xl p-6 max-w-md w-full shadow-2xl relative`}>
-              <button 
-                 onClick={() => setModalData(null)}
-                 className="absolute top-4 right-4 text-gray-400 hover:text-white transition-colors"
-              >
+              <button onClick={() => setModalData(null)} className="absolute top-4 right-4 text-gray-400 hover:text-white transition-colors">
                  <X className="w-5 h-5" />
               </button>
               <div className="flex items-center gap-3 mb-4">
@@ -477,10 +541,7 @@ const Dashboard = () => {
               <p className="text-gray-300 text-base md:text-lg leading-relaxed">{modalData.desc}</p>
               
               <div className="mt-8 pt-4 border-t border-dark-700 flex justify-end">
-                 <button 
-                    onClick={() => setModalData(null)}
-                    className="bg-dark-700 text-white px-4 py-2 rounded-lg hover:bg-dark-600 transition-colors"
-                 >
+                 <button onClick={() => setModalData(null)} className="bg-dark-700 text-white px-4 py-2 rounded-lg hover:bg-dark-600 transition-colors">
                     Close
                  </button>
               </div>
